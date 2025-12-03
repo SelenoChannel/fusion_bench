@@ -87,9 +87,8 @@ class DOGE_TA_Algorithm(
         """
         task_vectors = []
         pretrained_sd = pretrained_model.state_dict(keep_vars=True)
-        print(modelpool.all_model_names)
         if any(["qwen" in n.lower() for n in modelpool.all_model_names]):
-            print("[DEBUG] Merging Qwen")
+            log.info("[DEBUG] Merging Qwen")
             # our experiment implementation 
             # the original T5 was finetuned by lora. so DOGE author only merge q projection and v projection layer 
             filtered_keys = [
@@ -159,12 +158,14 @@ class DOGE_TA_Algorithm(
         initial_mem = torch.cuda.memory_allocated()
         start_time = time.time()
         for layer_name in task_vectors[0].keys():
+            print(f"optimizing delta for layer {layer_name}")
             layer_vectors = torch.stack([vec[layer_name] for vec in task_vectors]).to(
                 self.device
             )
             layer_lamdas = torch.stack(
                 [lamdas[layer_name] for lamdas in self.lamdas]
             ).to(self.device)
+            current_layer_proj = self.projection[layer_name].to(self.device)
             for _ in range(400):
                 optimizer.zero_grad()
                 loss = self.taskvector_loss(
@@ -172,13 +173,15 @@ class DOGE_TA_Algorithm(
                 )
                 self.fabric.backward(loss)
                 grad_proj = (
-                    self.projection[layer_name] @ self.delta[layer_name].grad.detach()
+                    current_layer_proj @ self.delta[layer_name].grad.detach()
                 )
                 self.delta[layer_name].grad.data = self.delta[
                     layer_name
                 ].grad.data.sub_(grad_proj)
                 optimizer.step()
                 self.delta[layer_name].grad = None
+            del layer_vectors, layer_lamdas, grad_proj, current_layer_proj
+            torch.cuda.empty_cache()
         end_time = time.time()
         print(f"Running time: {end_time - start_time} s")
         final_mem = torch.cuda.memory_allocated()
@@ -210,7 +213,12 @@ class DOGE_TA_Algorithm(
         for layer_name in task_vectors[0].keys():
             for i, vector in enumerate(task_vectors):
                 layer_vector = vector[layer_name].to(self.device)
-                u, s, v = torch.linalg.svd(layer_vector, full_matrices=False)
+                if any(["qwen" in n.lower() for n in modelpool.all_model_names]):
+                    log.info("[DEBUG] Casting tensor to float 32 for SVD")
+                    # SVD only runs on float32/float64 on GPU
+                    u, s, v = torch.linalg.svd(layer_vector.float(), full_matrices=False)
+                else:
+                    u, s, v = torch.linalg.svd(layer_vector, full_matrices=False)
                 if i == 0:
                     print(f"Computed SVD for {layer_name}...")
                     sum_u = torch.zeros_like(u, device=layer_vector.device)
@@ -235,11 +243,15 @@ class DOGE_TA_Algorithm(
                 u_u[:, : int(s.shape[0] / self.config.subspace)],
                 u_u[:, : int(s.shape[0] / self.config.subspace)].T,
             )
-            self.projection[layer_name] = layer_proj
+            # project back to df16 to save memory
+            self.projection[layer_name] = layer_proj.to(dtype=pretrained_model.dtype).cpu()
+            del u_u, s_u, v_u, sum_u, layer_proj
+            torch.cuda.empty_cache()
 
         self.optimize_delta(task_vectors)
 
         del self.projection
+
         self.delta = {key: param.detach().cpu() for key, param in self.delta.items()}
         self.lamdas = [
             {key: param.cpu() for key, param in lamdas.items()}
