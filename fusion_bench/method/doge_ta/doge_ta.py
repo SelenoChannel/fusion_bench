@@ -87,11 +87,26 @@ class DOGE_TA_Algorithm(
         """
         task_vectors = []
         pretrained_sd = pretrained_model.state_dict(keep_vars=True)
-        filtered_keys = [
-            k
-            for k in pretrained_sd.keys()
-            if ("encoder" in k and "layer_norm" not in k and "weight" in k)
-        ]  # Flan T5: "layer_norm" not in k and ("q.weight" in k or "v.weight" in k)
+        print(modelpool.all_model_names)
+        if any(["qwen" in n.lower() for n in modelpool.all_model_names]):
+            print("[DEBUG] Merging Qwen")
+            # our experiment implementation 
+            # the original T5 was finetuned by lora. so DOGE author only merge q projection and v projection layer 
+            filtered_keys = [
+                k
+                for k in pretrained_sd.keys()
+                # 1. Select only weights (ignore biases)
+                # 2. Select parameters inside the transformer blocks ('model.layers')
+                # 3. Exclude 'norm' (RMSNorm parameters are usually better left unmerged or averaged separately)
+                if "weight" in k and "model.layers" in k and "norm" not in k
+            ]
+        else:
+            # original implementation
+            filtered_keys = [
+                k
+                for k in pretrained_sd.keys()
+                if ("encoder" in k and "layer_norm" not in k and "weight" in k)
+            ]  # Flan T5: "layer_norm" not in k and ("q.weight" in k or "v.weight" in k)
 
         for model_name in modelpool.model_names:
             model = modelpool.load_model(model_name)
