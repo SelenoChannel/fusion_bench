@@ -73,9 +73,9 @@ class DOGE_TA_Algorithm(
         self.delta = None  # Initialize delta as None; will be set during run
         self.subspace = subspace # fixed to 6. Shared subspace basis size set at the rank divided by 6
         self.K = K # by default 30. retain only the top K% of parameters with thelargest magnitudes
-        self.lamda = lamda # should make average λ was close
+        self.lamda = lamda # should make average λ was close to 0.3
         self.normalize = normalize
-        self.lr = lr
+        self.lr = lr # learning rate 
         super().__init__()
 
     @property
