@@ -65,13 +65,17 @@ class DOGE_TA_Algorithm(
         "subspace": "subspace",
         "K": "K",
         "lamda": "lamda",
+        "normalize": "normalize",
+        "lr": "lr"
     }
 
-    def __init__(self, subspace, K, lamda):
+    def __init__(self, subspace, K, lamda, normalize, lr):
         self.delta = None  # Initialize delta as None; will be set during run
         self.subspace = subspace # fixed to 6. Shared subspace basis size set at the rank divided by 6
         self.K = K # by default 30. retain only the top K% of parameters with thelargest magnitudes
         self.lamda = lamda # should make average λ was close
+        self.normalize = normalize
+        self.lr = lr
         super().__init__()
 
     @property
@@ -137,7 +141,10 @@ class DOGE_TA_Algorithm(
             part3 = v_j * v_j
 
             expression = part1 + part2 + part3
-            layer_loss = expression.sum(dim=1).pow(2).sum()
+            if self.normalize:
+                layer_loss = expression.sum(dim=1).pow(2).mean()
+            else:
+                layer_loss = expression.sum(dim=1).pow(2).sum()
 
             # Cumulative total loss
             total_loss += layer_loss
@@ -154,7 +161,7 @@ class DOGE_TA_Algorithm(
                 for k, v in task_vectors[0].items()
             }
 
-        optimizer = torch.optim.Adam(self.delta.values(), lr=1e-4)
+        optimizer = torch.optim.Adam(self.delta.values(), lr=self.lr)
         initial_mem = torch.cuda.memory_allocated()
         start_time = time.time()
         for layer_name in task_vectors[0].keys():
@@ -171,6 +178,11 @@ class DOGE_TA_Algorithm(
                 loss = self.taskvector_loss(
                     layer_vectors, self.delta[layer_name], layer_lamdas
                 )
+                # --- LOGGING ADDED HERE ---
+                if _ % 50 == 0 or _ == 399:
+                    # .item() converts the tensor to a standard Python float
+                    log.info(f"[Layer: {layer_name}] Step {_}/400 | Loss: {loss.item():.6f}")
+                # --------------------------
                 self.fabric.backward(loss)
                 grad_proj = (
                     current_layer_proj @ self.delta[layer_name].grad.detach()
@@ -321,8 +333,11 @@ class DOGE_TA_Algorithm(
                 norm_vec = torch.norm(vec[layer_name])
                 tmp[layer_name] = self.config.lamda / norm_vec
             lamdas.append(tmp)
-        mean_lamda = torch.mean(torch.stack(lamdas))
-        log.info(f"[DEBUG]Mean value of all layer lambdas: {mean_lamda.item()}")
+        all_values = [val for layer_dict in lamdas for val in layer_dict.values()]
+        if all_values:
+            mean_lamda = torch.mean(torch.stack(all_values))
+            log.info(f"[DEBUG] Mean value of all layer lambdas: {mean_lamda.item()}")
+
         return lamdas
 
     def topk_values_mask(self, M, K):

@@ -2,3 +2,5 @@ _target_: fusion_bench.method.DOGE_TA_Algorithm
 subspace: 6
 K: 30
 lamda: 0.07
+normalize: False
+lr: 1e-4
