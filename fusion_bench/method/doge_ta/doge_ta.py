@@ -69,9 +69,9 @@ class DOGE_TA_Algorithm(
 
     def __init__(self, subspace, K, lamda):
         self.delta = None  # Initialize delta as None; will be set during run
-        self.subspace = subspace
-        self.K = K
-        self.lamda = lamda
+        self.subspace = subspace # fixed to 6. Shared subspace basis size set at the rank divided by 6
+        self.K = K # by default 30. retain only the top K% of parameters with thelargest magnitudes
+        self.lamda = lamda # should make average λ was close
         super().__init__()
 
     @property
@@ -225,6 +225,7 @@ class DOGE_TA_Algorithm(
                     sum_s = torch.zeros_like(s, device=layer_vector.device)
                     sum_v = torch.zeros_like(v, device=layer_vector.device)
 
+                # calculate subspace basis of size k
                 reduced_index_s = int(s.shape[0] / len(task_vectors))
 
                 # select only the first reduced_index_s columns of u and place them
@@ -239,6 +240,8 @@ class DOGE_TA_Algorithm(
                     :reduced_index_s, :
                 ]
             u_u, s_u, v_u = torch.linalg.svd(sum_u, full_matrices=False)
+
+            # select only Shared Subspace of size rank/self.config.subspace
             layer_proj = torch.matmul(
                 u_u[:, : int(s.shape[0] / self.config.subspace)],
                 u_u[:, : int(s.shape[0] / self.config.subspace)].T,
@@ -318,6 +321,8 @@ class DOGE_TA_Algorithm(
                 norm_vec = torch.norm(vec[layer_name])
                 tmp[layer_name] = self.config.lamda / norm_vec
             lamdas.append(tmp)
+        mean_lamda = torch.mean(torch.stack(lamdas))
+        log.info(f"[DEBUG]Mean value of all layer lambdas: {mean_lamda.item()}")
         return lamdas
 
     def topk_values_mask(self, M, K):
