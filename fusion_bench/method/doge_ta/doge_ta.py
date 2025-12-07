@@ -155,11 +155,12 @@ class DOGE_TA_Algorithm(
         """
         if self.delta is None:
             self.delta = {
-                k: nn.Parameter(torch.zeros_like(v, device=self.device).detach())
+                k: nn.Parameter(torch.zeros_like(v, device='cpu').detach())
                 for k, v in task_vectors[0].items()
             }
 
         optimizer = torch.optim.Adam(self.delta.values(), lr=self.lr)
+
         initial_mem = torch.cuda.memory_allocated()
         start_time = time.time()
         for layer_name in task_vectors[0].keys():
@@ -171,10 +172,12 @@ class DOGE_TA_Algorithm(
                 [lamdas[layer_name] for lamdas in self.lamdas]
             ).to(self.device)
             current_layer_proj = self.projection[layer_name].to(self.device)
+            gpu_delta = self.delta[layer_name].to(self.device).detach()
+            gpu_delta.requires_grad_(True)
             for _ in range(400):
                 optimizer.zero_grad()
                 loss = self.taskvector_loss(
-                    layer_vectors, self.delta[layer_name], layer_lamdas
+                    layer_vectors, gpu_delta, layer_lamdas
                 )
                 # --- LOGGING ADDED HERE ---
                 if _ % 50 == 0 or _ == 399:
@@ -183,14 +186,17 @@ class DOGE_TA_Algorithm(
                 # --------------------------
                 self.fabric.backward(loss)
                 grad_proj = (
-                    current_layer_proj @ self.delta[layer_name].grad.detach()
+                    current_layer_proj @ gpu_delta.grad.detach()
                 )
-                self.delta[layer_name].grad.data = self.delta[
-                    layer_name
-                ].grad.data.sub_(grad_proj)
+                gpu_delta.grad.data = gpu_delta.grad.data.sub_(grad_proj)
+                self.delta[layer_name].grad = gpu_delta.grad.to('cpu')
+
                 optimizer.step()
+
+                gpu_delta.data.copy_(self.delta[layer_name].data)
                 self.delta[layer_name].grad = None
-            del layer_vectors, layer_lamdas, grad_proj, current_layer_proj
+                gpu_delta.grad = None
+            del layer_vectors, layer_lamdas, grad_proj, current_layer_proj, gpu_delta
             torch.cuda.empty_cache()
         end_time = time.time()
         print(f"Running time: {end_time - start_time} s")
@@ -217,6 +223,7 @@ class DOGE_TA_Algorithm(
             pretrained_model = modelpool.load_model("_pretrained_")
 
         task_vectors = self.compute_task_vectors(modelpool, pretrained_model)
+        task_vectors = [{k: v.cpu() for k, v in tv.items()} for tv in task_vectors]
 
         self.lamdas = self.compute_layer_lamdas(task_vectors)
         self.projection = {}
@@ -229,11 +236,14 @@ class DOGE_TA_Algorithm(
                     u, s, v = torch.linalg.svd(layer_vector.float(), full_matrices=False)
                 else:
                     u, s, v = torch.linalg.svd(layer_vector, full_matrices=False)
+                vector_rank = s.shape[0]
+                del layer_vector 
+                
                 if i == 0:
                     print(f"Computed SVD for {layer_name}...")
-                    sum_u = torch.zeros_like(u, device=layer_vector.device)
-                    sum_s = torch.zeros_like(s, device=layer_vector.device)
-                    sum_v = torch.zeros_like(v, device=layer_vector.device)
+                    sum_u = torch.zeros_like(u, device=self.device)
+                    sum_s = torch.zeros_like(s, device=self.device)
+                    sum_v = torch.zeros_like(v, device=self.device)
 
                 # calculate subspace basis of size k
                 reduced_index_s = int(s.shape[0] / len(task_vectors))
@@ -249,20 +259,26 @@ class DOGE_TA_Algorithm(
                 sum_v[i * reduced_index_s : (i + 1) * reduced_index_s, :] = v[
                     :reduced_index_s, :
                 ]
+                del u, s, v
+                torch.cuda.empty_cache()
+
             u_u, s_u, v_u = torch.linalg.svd(sum_u, full_matrices=False)
+            del s_u, v_u, sum_u
+            torch.cuda.empty_cache()
+            if any(["qwen" in n.lower() for n in modelpool.all_model_names]) and ('embed' in layer_name or 'lm_head' in layer_name):
+                u_u = u_u.to('cpu')
 
             # select only Shared Subspace of size rank/self.config.subspace
             layer_proj = torch.matmul(
-                u_u[:, : int(s.shape[0] / self.config.subspace)],
-                u_u[:, : int(s.shape[0] / self.config.subspace)].T,
+                u_u[:, : int(vector_rank / self.config.subspace)],
+                u_u[:, : int(vector_rank / self.config.subspace)].T,
             )
             # project back to df16 to save memory
             self.projection[layer_name] = layer_proj.to(dtype=pretrained_model.dtype).cpu()
-            del u_u, s_u, v_u, sum_u, layer_proj
+            del u_u, layer_proj
             torch.cuda.empty_cache()
 
         self.optimize_delta(task_vectors)
-
         del self.projection
 
         self.delta = {key: param.detach().cpu() for key, param in self.delta.items()}
@@ -311,6 +327,7 @@ class DOGE_TA_Algorithm(
 
         self.print_profile_summary()
         return pretrained_model
+        
 
     def compute_lamdas(self, vectors: List[StateDictType]) -> torch.Tensor:
         lamdas = []
