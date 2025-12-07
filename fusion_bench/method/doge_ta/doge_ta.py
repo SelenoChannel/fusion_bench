@@ -98,10 +98,8 @@ class DOGE_TA_Algorithm(
             filtered_keys = [
                 k
                 for k in pretrained_sd.keys()
-                # 1. Select only weights (ignore biases)
-                # 2. Select parameters inside the transformer blocks ('model.layers')
-                # 3. Exclude 'norm' (RMSNorm parameters are usually better left unmerged or averaged separately)
-                if "weight" in k and "model.layers" in k and "norm" not in k
+                # Select only weights and exclude 'norm' 
+                if "weight" in k and "norm" not in k
             ]
         else:
             # original implementation
